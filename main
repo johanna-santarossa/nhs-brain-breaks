@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NHS Brain Breaks & Positive Primers</title>
+
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 920px;
+      margin: 40px auto;
+      padding: 0 16px;
+    }
+
+    h1 { margin-bottom: 6px; }
+    .sub { margin-top: 0; opacity: 0.75; }
+
+    .row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+      margin-top: 18px;
+    }
+
+    button, select {
+      padding: 10px 12px;
+      font-size: 16px;
+      border-radius: 12px;
+      border: 1px solid #ccc;
+    }
+
+    button { cursor: pointer; }
+
+    #card {
+      margin-top: 18px;
+      padding: 20px;
+      border: 1px solid #ddd;
+      border-radius: 16px;
+      cursor: pointer;
+      transition: background 0.2s ease;
+    }
+
+    #card:hover { background: #f8f9fa; }
+
+    #prompt {
+      font-size: 22px;
+      line-height: 1.35;
+      margin: 0;
+    }
+
+    #hint {
+      margin-top: 10px;
+      font-size: 14px;
+      opacity: 0.6;
+    }
+
+    #desc {
+      margin-top: 14px;
+      font-size: 16px;
+      line-height: 1.4;
+      display: none;
+      white-space: pre-wrap;
+    }
+
+    .meta {
+      opacity: 0.75;
+      font-size: 14px;
+      margin-top: 12px;
+    }
+
+    .status {
+      margin-top: 14px;
+      font-size: 14px;
+      opacity: 0.8;
+    }
+
+    .error {
+      color: #b00020;
+      opacity: 1;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>NHS Brain Breaks & Positive Primers</h1>
+  <p class="sub">Choose a type, click Randomise, then click the card to reveal.</p>
+
+  <div class="row">
+    <label>
+      Type:
+      <select id="category"></select>
+    </label>
+
+    <button id="spin">Randomise</button>
+    <button id="reset">Reset</button>
+    <button id="reload">Reload Sheet</button>
+  </div>
+
+  <div id="card" title="Click to reveal / hide the answer">
+    <p id="prompt">Loading prompts…</p>
+    <div id="hint">👆 Click to reveal</div>
+    <div id="desc"></div>
+    <div class="meta" id="meta"></div>
+  </div>
+
+  <div class="status" id="status"></div>
+
+  <script>
+    const CSV_URL =
+      "https://docs.google.com/spreadsheets/d/e/2PACX-1vTpqSsvCqd3XwejKsE9G9R-rfz6PWOgKf-prIYP24cqnuJn2fKmMGJ_EJM9Jvvi8WqdGRk0dJuuz20D/pub?gid=2038213715&single=true&output=csv";
+
+    let items = [];
+    const usedByCategory = new Map();
+    let descriptionVisible = false;
+
+    const categoryEl = document.getElementById("category");
+    const promptEl = document.getElementById("prompt");
+    const descEl = document.getElementById("desc");
+    const metaEl = document.getElementById("meta");
+    const hintEl = document.getElementById("hint");
+    const statusEl = document.getElementById("status");
+    const cardEl = document.getElementById("card");
+
+    function setStatus(msg, isError = false) {
+      statusEl.textContent = msg;
+      statusEl.className = "status" + (isError ? " error" : "");
+    }
+
+    function parseCSV(text) {
+      const rows = [];
+      let row = [], cur = "", inQuotes = false;
+
+      for (let i = 0; i < text.length; i++) {
+        const c = text[i];
+        const next = text[i + 1];
+
+        if (c === '"' && inQuotes && next === '"') { cur += '"'; i++; continue; }
+        if (c === '"') { inQuotes = !inQuotes; continue; }
+        if (c === ',' && !inQuotes) { row.push(cur); cur = ""; continue; }
+
+        if (!inQuotes && (c === '\n' || c === '\r')) {
+          if (c === '\r' && next === '\n') i++;
+          if (cur.length || row.length) row.push(cur);
+          cur = "";
+          if (row.length) rows.push(row);
+          row = [];
+          continue;
+        }
+
+        cur += c;
+      }
+
+      if (cur.length || row.length) {
+        row.push(cur);
+        rows.push(row);
+      }
+      return rows;
+    }
+
+    function norm(h) {
+      return (h || "").trim().toLowerCase().replace(/\s+/g, "");
+    }
+
+    function buildItemsFromRows(rows) {
+      if (rows.length < 2) return [];
+      const headers = rows[0].map(norm);
+
+      const idxCategory = headers.indexOf("category");
+      const idxPrompt = headers.indexOf("prompt");
+      const idxDescription = headers.indexOf("description");
+      const idxTime = headers.indexOf("time");
+
+      if (idxCategory === -1 || idxPrompt === -1) {
+        throw new Error("Sheet must include Category and Prompt columns.");
+      }
+
+      const out = [];
+      for (let r = 1; r < rows.length; r++) {
+        const cols = rows[r];
+        const category = (cols[idxCategory] || "").trim();
+        const prompt = (cols[idxPrompt] || "").trim();
+        const description = idxDescription >= 0 ? (cols[idxDescription] || "").trim() : "";
+        const time = idxTime >= 0 ? (cols[idxTime] || "").trim() : "";
+
+        if (!category || !prompt) continue;
+        out.push({ category, prompt, description, time });
+      }
+      return out;
+    }
+
+    function populateCategories(items) {
+      const cats = [...new Set(items.map(i => i.category))].sort();
+      categoryEl.innerHTML = "";
+      cats.forEach(c => {
+        const opt = document.createElement("option");
+        opt.value = c;
+        opt.textContent = c;
+        categoryEl.appendChild(opt);
+      });
+    }
+
+    function resetUsed() {
+      usedByCategory.clear();
+      promptEl.textContent = "Reset done. Click Randomise 👇";
+      descEl.style.display = "none";
+      hintEl.style.display = "block";
+      metaEl.textContent = "";
+      setStatus("No-repeats reset.");
+    }
+
+    function getRandomForCategory(category) {
+      const indices = items
+        .map((x, i) => x.category === category ? i : -1)
+        .filter(i => i >= 0);
+
+      const used = usedByCategory.get(category) || new Set();
+      const available = indices.filter(i => !used.has(i));
+      if (!available.length) return null;
+
+      const pick = available[Math.floor(Math.random() * available.length)];
+      used.add(pick);
+      usedByCategory.set(category, used);
+      return items[pick];
+    }
+
+    function showItem(item) {
+      promptEl.textContent = item.prompt;
+      descEl.textContent = item.description || "(No description provided)";
+      descEl.style.display = "none";
+      hintEl.style.display = "block";
+      descriptionVisible = false;
+
+      const bits = [];
+      if (item.category) bits.push(`Type: ${item.category}`);
+      if (item.time) bits.push(`Time: ${item.time}`);
+      metaEl.textContent = bits.join(" • ");
+    }
+
+    cardEl.onclick = () => {
+      if (!descEl.textContent) return;
+      descriptionVisible = !descriptionVisible;
+      descEl.style.display = descriptionVisible ? "block" : "none";
+      hintEl.style.display = descriptionVisible ? "none" : "block";
+    };
+
+    async function loadFromSheet() {
+      try {
+        setStatus("Loading from Google Sheet…");
+        const res = await fetch(CSV_URL, { cache: "no-store" });
+        if (!res.ok) throw new Error("Fetch failed");
+
+        const text = await res.text();
+        const rows = parseCSV(text);
+        items = buildItemsFromRows(rows);
+
+        populateCategories(items);
+        resetUsed();
+
+        const first = getRandomForCategory(categoryEl.value);
+        if (first) showItem(first);
+
+        setStatus(`Loaded ${items.length} prompts.`);
+      } catch (e) {
+        setStatus("Could not load Google Sheet. Check publish link.", true);
+        promptEl.textContent = "Error loading prompts.";
+        hintEl.style.display = "none";
+        descEl.style.display = "none";
+      }
+    }
+
+    document.getElementById("spin").onclick = () => {
+      const item = getRandomForCategory(categoryEl.value);
+      if (!item) {
+        promptEl.textContent = "No more in this category — hit Reset.";
+        descEl.style.display = "none";
+        hintEl.style.display = "none";
+        metaEl.textContent = "";
+        return;
+      }
+      showItem(item);
+    };
+
+    document.getElementById("reset").onclick = resetUsed;
+    document.getElementById("reload").onclick = loadFromSheet;
+
+    loadFromSheet();
+  </script>
+</body>
+</html>
